@@ -8,6 +8,7 @@ import pystray
 from PIL import Image, ImageDraw, ImageFont
 from customtkinter import filedialog
 from moe_router import MoERouter 
+from audio_engine import AudioEngine
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -22,8 +23,11 @@ class UnityOracleUI(ctk.CTk):
         
         self.chat_history_file = "chat_history.json"
         self.token_queue = queue.Queue()
-        self.history_data = [] # Now stores clean {"role": "User/Oracle", "text": "..."} blocks
+        self.history_data = [] # Stores clean {"role": "User/Oracle", "text": "..."} blocks
         self.is_thinking = False
+        # Audio State Variables
+        self.tts_enabled = False
+        self.audio = AudioEngine(self.handle_audio_callback)
         
         self.build_ui()
         self.setup_hotkey()
@@ -51,7 +55,7 @@ class UnityOracleUI(ctk.CTk):
         draw.ellipse((28, 30, 36, 38), fill=(20, 30, 50))
         
         # Load a serif font (replace with actual path)
-        font = ImageFont.truetype("DejaVuSerif-Bold.ttf", 36)
+        font = ImageFont.truetype("C:/Windows/Fonts/COPRGTL.TTF", 36)
         text = "O"
         # Get exact bounding box
         bbox = draw.textbbox((0, 0), text, font=font)
@@ -121,22 +125,31 @@ class UnityOracleUI(ctk.CTk):
         # C. Input Area (Multi-line Textbox)
         self.input_frame = ctk.CTkFrame(self.main_frame, height=80)
         self.input_frame.grid(row=3, column=0, sticky="ew", pady=(5, 0))
-        self.input_frame.grid_columnconfigure(1, weight=1)
+        
+        # We want the text box (which will be in column 2) to expand and take up empty space
+        self.input_frame.grid_columnconfigure(2, weight=1)
         self.current_image_path = None 
 
-        self.btn_attach = ctk.CTkButton(self.input_frame, text="📎", width=40, height=40, command=self.attach_image)
-        self.btn_attach.grid(row=0, column=0, padx=(10, 5), pady=10, sticky="n")
+        # Column 0: Mic Button
+        self.btn_mic = ctk.CTkButton(self.input_frame, text="🎙️", width=40, height=40, fg_color="#555555", hover_color="#777777", command=self.toggle_mic)
+        self.btn_mic.grid(row=0, column=0, padx=(10, 0), pady=10, sticky="n")
 
-        # Replaced CTkEntry with CTkTextbox for wrapping and multi-line
+        # Column 1: Attach Button
+        self.btn_attach = ctk.CTkButton(self.input_frame, text="📎", width=40, height=40, command=self.attach_image)
+        self.btn_attach.grid(row=0, column=1, padx=(5, 5), pady=10, sticky="n")
+
+        # Column 2: The Textbox (Removed the duplicate declaration)
         self.input_box = ctk.CTkTextbox(self.input_frame, height=60, wrap="word", font=("Arial", 14))
-        self.input_box.grid(row=0, column=1, sticky="ew", padx=5, pady=10)
+        self.input_box.grid(row=0, column=2, sticky="ew", padx=5, pady=10)
+        
         self.input_box.insert("0.0", "Ask the Oracle... (Shift+Enter for new line)")
         self.input_box.bind("<FocusIn>", self.clear_placeholder)
         self.input_box.bind("<Return>", self.handle_return)
         self.input_box.bind("<Shift-Return>", self.handle_shift_return)
 
+        # Column 3: Send Button
         self.btn_send = ctk.CTkButton(self.input_frame, text="Send", width=60, height=40, command=self.send_message)
-        self.btn_send.grid(row=0, column=2, padx=(5, 10), pady=10, sticky="n")
+        self.btn_send.grid(row=0, column=3, padx=(5, 10), pady=10, sticky="n")
 
     # Input & Threading Handling
     def clear_placeholder(self, event):
@@ -202,6 +215,10 @@ class UnityOracleUI(ctk.CTk):
         # Get full answer while streaming to UI
         full_answer = self.router.chat(user_text, image_path=image_path, stream_callback=self.handle_stream)
         
+        # Make Oracle speak if enabled
+        if getattr(self, 'tts_enabled', False):
+            self.audio.speak(full_answer)
+            
         # Add a clean closing message so you know it's done
         self.token_queue.put(("\n\n[System: Task Completed]\n\n", "System"))
         self.token_queue.put(("[DONE]", "Command")) # Signal to stop progress bar
@@ -209,12 +226,16 @@ class UnityOracleUI(ctk.CTk):
         self.history_data.append({"role": "User", "text": display_text})
         self.history_data.append({"role": "Oracle", "text": f"Oracle: {full_answer}\n"})
         self.save_history()
-        self.refresh_history_sidebar()
+        self.token_queue.put(("[REFRESH_HISTORY]", "Command"))
+        
+        if getattr(self, 'tts_enabled', False):
+            self.audio.speak(full_answer)
 
     def handle_stream(self, token, model_name):
         self.token_queue.put((token, model_name))
 
     def check_queue(self):
+        if not self.winfo_exists(): return
         while not self.token_queue.empty():
             token, tag = self.token_queue.get()
             
@@ -230,6 +251,24 @@ class UnityOracleUI(ctk.CTk):
                     self.force_show()
                 elif token == "[QUIT]":
                     self.quit_app()
+                elif token == "[REFRESH_HISTORY]":
+                    self.refresh_history_sidebar()
+                continue
+            
+            if tag == "AudioCMD":
+                if token == "[SHOW_UI]":
+                    self.force_show()
+                elif token == "[CMD_NEW_CHAT]":
+                    self.start_new_chat()
+                elif token == "[CMD_CLEAR_CHAT]":
+                    self.clear_history()
+                elif token == "[CMD_HIDE]":
+                    self.withdraw()
+                else:
+                    # It's a spoken query! Put it in the box and hit send.
+                    self.input_box.delete("0.0", "end")
+                    self.input_box.insert("0.0", token)
+                    self.send_message()
                 continue
                 
             self._insert_text(token, tag)
@@ -255,7 +294,20 @@ class UnityOracleUI(ctk.CTk):
             self.force_show()
         else:
             self.withdraw()
+            
+    def toggle_mic(self):
+        """Turns the wake-word listener on and off."""
+        if self.audio.is_listening:
+            self.audio.stop_listening()
+            self.btn_mic.configure(fg_color="#555555") # Grey
+        else:
+            self.audio.start_listening()
+            self.btn_mic.configure(fg_color="#E74C3C") # Red (Live)
 
+    def handle_audio_callback(self, command_or_text):
+        """Receives text from the AudioEngine thread safely."""
+        self.token_queue.put((command_or_text, "AudioCMD"))
+        
     def force_show(self):
         self.deiconify()
         self.attributes('-topmost', True)
@@ -263,9 +315,12 @@ class UnityOracleUI(ctk.CTk):
         self.input_box.focus()
 
     def quit_app(self):
+        """Safely shuts down all threads and icons to prevent bgerror crashes."""
+        self.audio.stop_listening()
         if hasattr(self, 'tray_icon'):
             self.tray_icon.stop()
-        self.destroy()
+        self.quit() # Halts the Tkinter mainloop
+        self.destroy() # Destroys the window
 
     def open_settings(self):
         settings_window = ctk.CTkToplevel(self)
@@ -315,12 +370,41 @@ class UnityOracleUI(ctk.CTk):
         txt_q_prompt = ctk.CTkTextbox(settings_window, height=100, wrap="word")
         txt_q_prompt.pack(fill="x", padx=20)
         if hasattr(self, 'router'): txt_q_prompt.insert("0.0", self.router.qwen_system_prompt)
+        
+        # 4. Audio Settings
+        lbl_audio = ctk.CTkLabel(settings_window, text="Audio Integration:", font=("Arial", 12, "bold"))
+        lbl_audio.pack(padx=20, pady=(20, 0), anchor="w")
 
+        def toggle_tts():
+            self.tts_enabled = not getattr(self, 'tts_enabled', False)
+        sw_tts = ctk.CTkSwitch(settings_window, text="Oracle Speaks Answers (TTS)", command=toggle_tts)
+        sw_tts.pack(pady=5, padx=20, anchor="w")
+        if getattr(self, 'tts_enabled', False): sw_tts.select()
+        
+        def change_voice(choice):
+            self.audio.set_voice(choice)
+        opt_voice = ctk.CTkOptionMenu(settings_window, values=["Female", "Male"], command=change_voice)
+        opt_voice.pack(pady=5, padx=20, anchor="w")
+        opt_voice.set("Female")
+        
+        # NEW: Customizable Wake Response Input
+        lbl_wake = ctk.CTkLabel(settings_window, text="Wake Greeting:", font=("Arial", 12))
+        lbl_wake.pack(padx=20, pady=(10, 0), anchor="w")
+        
+        txt_wake = ctk.CTkEntry(settings_window, width=250)
+        txt_wake.pack(padx=20, pady=5, anchor="w")
+        if hasattr(self, 'audio'):
+            txt_wake.insert(0, self.audio.wake_response)
+            
         # Save Button
         def save_settings():
             if hasattr(self, 'router'):
                 self.router.gemma_system_prompt = txt_g_prompt.get("0.0", "end").strip()
                 self.router.qwen_system_prompt = txt_q_prompt.get("0.0", "end").strip()
+                
+            if hasattr(self, 'audio'):
+                self.audio.set_wake_response(txt_wake.get())
+                
             settings_window.destroy()
             self.append_text("System: Core Settings Updated.\n\n", "System")
 
@@ -345,17 +429,35 @@ class UnityOracleUI(ctk.CTk):
         self.refresh_history_sidebar()
 
     def refresh_history_sidebar(self):
-        # Clear existing buttons
         for widget in self.history_list.winfo_children():
             widget.destroy()
             
-        # Create a button for each user prompt in history
-        user_queries = [item["text"] for item in self.history_data if item["role"] == "User"]
-        for idx, query in enumerate(reversed(user_queries)):
-            short_title = query.replace("You: ", "").strip()[:20] + "..."
-            btn = ctk.CTkButton(self.history_list, text=short_title, anchor="w", fg_color="transparent", 
-                                hover_color="#333333", text_color="#AAAAAA")
-            btn.pack(fill="x", pady=2)
+        # Create a button for each user prompt
+        for idx, item in enumerate(self.history_data):
+            if item["role"] == "User":
+                short_title = item["text"].replace("You: ", "").replace("\n", "").strip()[:20] + "..."
+                # FIX: Pass the specific index to the button command
+                btn = ctk.CTkButton(self.history_list, text=short_title, anchor="w", fg_color="transparent", 
+                                    hover_color="#333333", text_color="#AAAAAA",
+                                    command=lambda i=idx: self.load_specific_chat(i))
+                btn.pack(fill="x", pady=2)
+
+    def load_specific_chat(self, index):
+        """Clears the screen and displays only the selected conversation."""
+        self.chat_display.configure(state="normal")
+        self.chat_display.delete('1.0', 'end')
+        
+        # Insert the User question
+        user_msg = self.history_data[index]
+        self.chat_display.insert("end", user_msg["text"], "User")
+        
+        # Try to find and insert the Oracle's answer that immediately followed
+        if index + 1 < len(self.history_data) and self.history_data[index + 1]["role"] == "Oracle":
+            oracle_msg = self.history_data[index + 1]
+            self.chat_display.insert("end", oracle_msg["text"], "Qwen (Advisor + RAG)")
+            
+        self.chat_display.configure(state="disabled")
+        self.append_text("\n[System: Viewing past conversation]\n\n", "System")
 
     def clear_history(self):
         self.chat_display.configure(state="normal")

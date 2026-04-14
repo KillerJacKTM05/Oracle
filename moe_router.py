@@ -13,12 +13,12 @@ class MoERouter:
         print("Initializing Knowledge Base...")
         self.rag_db = KnowledgeBase()
         
-        self.gemma_system_prompt = """You named Oracle. You are a fast, front-line Unity C# assistant. 
+        self.gemma_system_prompt = """You are a part of Oracle, in the role of fast, front-line Unity C# assistant. 
 Your job is to answer simple syntax, UI, and basic scripting questions. You can analyze images if provided.
 If the user asks a complex architectural question, requires deep documentation, or if you are unsure, reply EXACTLY with: <ESCALATE>
 so, you will be able to ask your supervisor and it will try to give answer. You can also learn from that."""
 
-        self.qwen_system_prompt = """You are the Senior Unity Architect. You step in when the front-line model is unsure. 
+        self.qwen_system_prompt = """You are a part of Oracle, the role of Senior Unity Architect. You step in when the front-line model is unsure. 
 You will be provided with context from the official Unity documentation. 
 Use the context to provide a highly detailed, perfectly structured, and accurate answer."""
 
@@ -29,12 +29,16 @@ Use the context to provide a highly detailed, perfectly structured, and accurate
     # Added image_path parameter
     def chat(self, user_query, image_path=None, stream_callback=None):
         if stream_callback:
-            stream_callback("\n[System: Asking Front-Hand...]\n", "System")
+            stream_callback("\n[System: Front-Hand skimming documentation...]\n", "System")
 
-        # Build the user message dynamically to include the image if it exists
-        user_message = {'role': 'user', 'content': user_query}
+        # SHALLOW RAG: Get only the top 1 result for speed
+        shallow_context = self.rag_db.search(user_query, top_k=1)
+        gemma_query = f"CONTEXT:\n{shallow_context}\n\nUSER QUESTION:\n{user_query}"
+
+        # Build the user message
+        user_message = {'role': 'user', 'content': gemma_query}
         if image_path:
-            user_message['images'] = [image_path] # Ollama natively handles the file path
+            user_message['images'] = [image_path]
 
         try:
             gemma_response = ollama.chat(
@@ -48,7 +52,7 @@ Use the context to provide a highly detailed, perfectly structured, and accurate
             
             if "<ESCALATE>" in reply:
                 if stream_callback:
-                    stream_callback("\n[System: Question too complex or requires deep image analysis. Waking up Advisor...]\n", "System")
+                    stream_callback("\n[System: Task complex. Escaping to Advisor...]\n", "System")
                 return self._call_advisor(user_query, user_message, stream_callback)
             
             if stream_callback:
@@ -62,10 +66,14 @@ Use the context to provide a highly detailed, perfectly structured, and accurate
             if stream_callback:
                 stream_callback(f"\n[System Error: {e}. Falling back to Advisor.]\n", "System")
             return self._call_advisor(user_query, user_message, stream_callback)
-
+        
     # Accept the pre-built user_message (which includes the image)
     def _call_advisor(self, user_query, user_message, stream_callback):
-        rag_context = self.rag_db.search(user_query, top_k=3)
+        if stream_callback:
+            stream_callback("[System: Advisor diving deep into Knowledge Base...]\n", "System")
+            
+        # DEEP RAG: Get the top 5 results for maximum context
+        deep_context = self.rag_db.search(user_query, top_k=5)
         
         available_ram = self.check_available_ram()
         if available_ram >= self.ram_threshold_gb:
@@ -73,12 +81,11 @@ Use the context to provide a highly detailed, perfectly structured, and accurate
         else:
             active_model = self.safe_advisor
             if stream_callback:
-                stream_callback(f"\n[System Warning: Low RAM ({available_ram:.1f}GB). Using Safe Advisor.]\n", "System")
+                stream_callback(f"[System Warning: Low RAM ({available_ram:.1f}GB). Using Safe Advisor.]\n", "System")
 
-        # Modify the text content of the message to inject the RAG context, 
-        # but keep the image attached to the dictionary
+        # Overwrite the Gemma shallow prompt with the new Deep prompt
         advisor_message = user_message.copy()
-        advisor_message['content'] = f"CONTEXT:\n{rag_context}\n\nUSER QUESTION:\n{user_query}"
+        advisor_message['content'] = f"CONTEXT:\n{deep_context}\n\nUSER QUESTION:\n{user_query}"
         
         stream = ollama.chat(
             model=active_model,
