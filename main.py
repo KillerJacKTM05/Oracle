@@ -325,7 +325,7 @@ class UnityOracleUI(ctk.CTk):
     def open_settings(self):
         settings_window = ctk.CTkToplevel(self)
         settings_window.title("Oracle Core Settings")
-        settings_window.geometry("550x650")
+        settings_window.geometry("550x750")
         settings_window.attributes('-topmost', True)
         
         # 1. Always On Top Toggle
@@ -387,7 +387,7 @@ class UnityOracleUI(ctk.CTk):
         opt_voice.pack(pady=5, padx=20, anchor="w")
         opt_voice.set("Female")
         
-        # NEW: Customizable Wake Response Input
+        # Customizable Wake Response Input
         lbl_wake = ctk.CTkLabel(settings_window, text="Wake Greeting:", font=("Arial", 12))
         lbl_wake.pack(padx=20, pady=(10, 0), anchor="w")
         
